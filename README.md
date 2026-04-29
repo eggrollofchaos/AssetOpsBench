@@ -112,7 +112,7 @@ We are expanding **AssetOpsBench** to cover a broader range of industrial challe
 AssetOpsBench is a **unified framework for developing, orchestrating, and evaluating domain-specific AI agents** in industrial asset operations and maintenance.  
 
 It provides:
-- 4 **domain-specific agents**  
+- 4 **domain-specific agents** (IoT, FMSR, TSFM, WO) plus an optional **Smart Grid 7th-domain** add-on covering transformer health, DGA fault classification, RUL forecasting, and work-order management
 - 2 **multi-agent orchestration frameworks**  
 
 Designed for **maintenance engineers, reliability specialists, and facility planners**, it allows reproducible evaluation of multi-step workflows in simulated industrial environments.
@@ -144,6 +144,9 @@ Explore all scenarios [HF-Dataset](https://huggingface.co/datasets/ibm-research/
 ### Multi-Agent Frameworks (Blue Prints)
 - **[MetaAgent](https://github.com/IBM/AssetOpsBench/tree/main/src/meta_agent)**: reAct-based single-agent-as-tool orchestration
 - **[AgentHive](https://github.com/IBM/AssetOpsBench/tree/main/src/agent_hive)**: plan-and-execute sequential workflow
+
+### Smart Grid 7th-domain add-on
+`src/servers/smart_grid/` adds a Smart Grid transformer-operations domain that pairs with the original four general-purpose servers. Same MCP transport contract; Smart-Grid-specific tools (DGA Rogers Ratio analysis, transformer RUL, fault-record + work-order workflow). Originally developed in the [HPML Smart Grid MCP project](https://github.com/HPML6998-S26-Team13/hpml-assetopsbench-smart-grid-mcp) and ported here so Smart Grid Bench is a first-class AOB domain. Set `SG_DATA_DIR` to point at the processed CSV directory; scenarios live in `src/scenarios/local/smart_grid.json` (16 records covering single-domain probes + multi-step end-to-end workflows).
 
 ### MCP Environment
 The `src/` directory contains MCP servers and a plan-execute runner built on the [Model Context Protocol](https://modelcontextprotocol.io/).
