@@ -25,7 +25,7 @@ from pathlib import Path
 
 from openai import AsyncOpenAI
 
-from agents import Agent, ModelProvider, OpenAIChatCompletionsModel, RunConfig, Runner, set_tracing_disabled
+from agents import Agent, ModelProvider, ModelSettings, OpenAIChatCompletionsModel, RunConfig, Runner, set_tracing_disabled
 from agents.mcp import MCPServerStdio
 
 from observability import agent_run_span, persist_trajectory
@@ -185,6 +185,11 @@ class OpenAIAgentRunner(AgentRunner):
         model: LiteLLM model string with ``litellm_proxy/`` prefix
                (default: ``litellm_proxy/azure/gpt-5.4``).
         max_turns: Maximum agentic loop turns (default: 30).
+        parallel_tool_calls: Forwarded to ``ModelSettings.parallel_tool_calls``.
+            Default ``False`` keeps per-turn tool calls strictly sequential
+            so latency comparisons stay deterministic. Set to ``True`` only
+            when the agent loop is known to handle concurrent tool returns.
+            ``None`` leaves the SDK default in place.
     """
 
     def __init__(
@@ -193,12 +198,37 @@ class OpenAIAgentRunner(AgentRunner):
         server_paths: dict[str, Path | str] | None = None,
         model: str = _DEFAULT_MODEL,
         max_turns: int = 30,
+        parallel_tool_calls: bool | None = False,
     ) -> None:
         super().__init__(llm, server_paths)
         self._model_id = model
         self._model = resolve_model(model)
         self._run_config = _build_run_config(model)
         self._max_turns = max_turns
+        self._parallel_tool_calls = parallel_tool_calls
+
+    def _build_agent(self, active_servers: list) -> Agent:
+        """Build the configured Agent given an already-active MCP server list.
+
+        Extracted so single-prompt ``run()`` and batch ``run_batch()`` can
+        share the same agent construction (and the same ``ModelSettings``)
+        without duplicating the call site.
+        """
+        return Agent(
+            name="AssetOps Assistant",
+            instructions=AGENT_SYSTEM_PROMPT,
+            mcp_servers=active_servers,
+            model=self._model,
+            model_settings=ModelSettings(
+                parallel_tool_calls=self._parallel_tool_calls,
+            ),
+        )
+
+    def _run_kwargs(self) -> dict:
+        kwargs: dict = dict(max_turns=self._max_turns)
+        if self._run_config is not None:
+            kwargs["run_config"] = self._run_config
+        return kwargs
 
     async def run(self, question: str) -> AgentResult:
         """Run the OpenAI Agents SDK loop for *question*.
@@ -222,12 +252,7 @@ class OpenAIAgentRunner(AgentRunner):
                 active_servers = [
                     await stack.enter_async_context(s) for s in mcp_servers
                 ]
-                agent = Agent(
-                    name="AssetOps Assistant",
-                    instructions=AGENT_SYSTEM_PROMPT,
-                    mcp_servers=active_servers,
-                    model=self._model,
-                )
+                agent = self._build_agent(active_servers)
 
                 _log.info(
                     "OpenAIAgentRunner: starting query (model=%s, servers=%d)",
@@ -235,14 +260,10 @@ class OpenAIAgentRunner(AgentRunner):
                     len(active_servers),
                 )
 
-                run_kwargs: dict = dict(max_turns=self._max_turns)
-                if self._run_config is not None:
-                    run_kwargs["run_config"] = self._run_config
-
                 result = await Runner.run(
                     agent,
                     question,
-                    **run_kwargs,
+                    **self._run_kwargs(),
                 )
 
                 answer = result.final_output or ""
@@ -277,5 +298,88 @@ class OpenAIAgentRunner(AgentRunner):
                     answer=answer,
                     trajectory=trajectory,
                 )
+
+    async def run_batch(
+        self,
+        prompts: list[str],
+        trials: int = 1,
+    ) -> list[AgentResult]:
+        """Run multiple prompts × trials with MCP server connection reuse.
+
+        Builds the MCP server stack once and reuses the connections across
+        every prompt × trial inside a single ``AsyncExitStack`` context, so
+        the per-trial cost no longer pays MCP startup. This is the AOB
+        equivalent of the team-repo Cell C optimized batch path
+        (``scripts/aat_runner.py::_main_multi``).
+
+        Per-trial errors are captured in the returned ``AgentResult.error``
+        field rather than raised, so a single bad trial does not abort the
+        whole batch. The returned list always has length
+        ``len(prompts) * trials``, ordered by prompt then trial.
+
+        Args:
+            prompts: Prompts to run, each potentially repeated ``trials``
+                times.
+            trials: Per-prompt repeat count (default 1). Must be >= 1.
+
+        Returns:
+            One ``AgentResult`` per (prompt, trial). Successful trials have
+            populated ``answer`` and ``trajectory`` and ``error is None``;
+            failed trials have ``answer == ""`` and ``error`` set to a
+            short ``"<ExcClass>: <message>"`` string.
+        """
+        if trials < 1:
+            raise ValueError(f"trials must be >= 1, got {trials}")
+
+        results: list[AgentResult] = []
+        mcp_servers = _build_mcp_servers(self._server_paths)
+        run_kwargs = self._run_kwargs()
+
+        async with AsyncExitStack() as stack:
+            active_servers = [
+                await stack.enter_async_context(s) for s in mcp_servers
+            ]
+            agent = self._build_agent(active_servers)
+
+            _log.info(
+                "OpenAIAgentRunner.run_batch: %d prompt(s) x %d trial(s) "
+                "(model=%s, servers=%d)",
+                len(prompts),
+                trials,
+                self._model,
+                len(active_servers),
+            )
+
+            for prompt_idx, prompt in enumerate(prompts):
+                for trial in range(1, trials + 1):
+                    started_at = _dt.datetime.now(_dt.UTC).isoformat()
+                    try:
+                        result = await Runner.run(agent, prompt, **run_kwargs)
+                        answer = result.final_output or ""
+                        trajectory = _build_trajectory(result)
+                        trajectory.started_at = started_at
+                        results.append(
+                            AgentResult(
+                                question=prompt,
+                                answer=answer,
+                                trajectory=trajectory,
+                            )
+                        )
+                    except Exception as exc:
+                        _log.exception(
+                            "run_batch: prompt %d trial %d failed",
+                            prompt_idx,
+                            trial,
+                        )
+                        results.append(
+                            AgentResult(
+                                question=prompt,
+                                answer="",
+                                trajectory=Trajectory(started_at=started_at),
+                                error=f"{type(exc).__name__}: {exc}",
+                            )
+                        )
+
+        return results
 
 

@@ -67,8 +67,15 @@ class Trajectory:
 
 @dataclass
 class AgentResult:
-    """Result returned by any AgentRunner."""
+    """Result returned by any AgentRunner.
+
+    The optional ``error`` field is populated only by callers that capture
+    per-trial failures without raising — typically batch runners that need
+    to keep producing results for the remaining trials when one fails. A
+    successful run leaves it ``None`` and ``answer`` populated.
+    """
 
     question: str
     answer: str
     trajectory: Any
+    error: str | None = None
