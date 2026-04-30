@@ -330,6 +330,8 @@ class OpenAIAgentRunner(AgentRunner):
         """
         if trials < 1:
             raise ValueError(f"trials must be >= 1, got {trials}")
+        if not prompts:
+            raise ValueError("prompts must contain at least one prompt")
 
         results: list[AgentResult] = []
         mcp_servers = _build_mcp_servers(self._server_paths)

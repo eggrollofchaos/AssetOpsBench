@@ -76,6 +76,22 @@ async def test_run_batch_rejects_zero_trials(monkeypatch):
 
 
 @pytest.mark.anyio
+async def test_run_batch_rejects_empty_prompts(monkeypatch):
+    """Empty prompts list is treated as a configuration mistake.
+
+    Prevents the silent no-op where MCP servers would be built and
+    entered for an empty work list (e.g., when a scenario glob matched
+    nothing).
+    """
+    runner = _runner(monkeypatch)
+    with patch("agent.openai_agent.runner._build_mcp_servers") as build_mcp:
+        with pytest.raises(ValueError, match="at least one prompt"):
+            await runner.run_batch(prompts=[], trials=3)
+        # Guard fires before any MCP server is constructed.
+        build_mcp.assert_not_called()
+
+
+@pytest.mark.anyio
 async def test_run_batch_returns_result_per_prompt_trial(monkeypatch):
     runner = _runner(monkeypatch)
     fake_runner_run = AsyncMock(return_value=_make_run_result("answer-x"))
