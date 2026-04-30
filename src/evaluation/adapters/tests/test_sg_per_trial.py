@@ -227,3 +227,88 @@ def test_load_team_run_dir_skips_unparseable(tmp_path: Path, caplog):
     (run_dir / "x_run01.json").write_text("not-json")
     records = load_team_run_dir(run_dir)
     assert records == []
+
+
+# --------------------------------------------------------------------------- metrics integration
+
+
+def _aat_payload_with_role_turns() -> dict:
+    """AaT payload with the real role-based turn shape produced by the team runner."""
+    return {
+        "question": "Investigate T-015.",
+        "answer": "WO-7531.",
+        "success": True,
+        "history": [
+            {"role": "user", "content": "Investigate T-015.", "tool_calls": [], "turn": 0},
+            {
+                "role": "assistant",
+                "content": "Looking up sensors.",
+                "tool_calls": [
+                    {"name": "list_assets", "arguments": "{}", "call_id": "c1", "output": "T-015"},
+                    {"name": "get_dga", "arguments": "{}", "call_id": "c2", "output": "FM-007"},
+                ],
+                "turn": 1,
+            },
+        ],
+        "turn_count": 2,
+        "tool_call_count": 2,
+        "scenario": {"id": "SGT-009", "type": "transformer_fault"},
+        "runner_meta": {"model_id": "openai/Llama-3.1-8B-Instruct", "mcp_mode": "baseline"},
+    }
+
+
+def _pe_payload_with_history_steps() -> dict:
+    """PE payload with the real step-result history shape produced by the team runner."""
+    return {
+        "question": "Investigate T-015.",
+        "answer": "DGA fault FM-007.",
+        "success": True,
+        "plan": ["list_assets", "get_dga"],
+        "history": [
+            {"step": 1, "task": "list", "tool": "list_assets", "tool_args": {},
+             "server": "iot", "response": "T-015", "success": True, "error": None,
+             "executor_success": True},
+            {"step": 2, "task": "DGA", "tool": "get_dga", "tool_args": {},
+             "server": "fmsr", "response": "FM-007", "success": True, "error": None,
+             "executor_success": True},
+        ],
+        "scenario": {"id": "SGT-009", "type": "transformer_fault"},
+    }
+
+
+def test_metrics_from_aat_record_nonzero():
+    from evaluation.metrics import metrics_from_trajectory
+
+    rec = from_per_trial_dict(_aat_payload_with_role_turns(), run_id="run-x")
+    ops = metrics_from_trajectory(rec)
+    assert ops.turn_count == 2
+    assert ops.tool_call_count == 2
+    assert ops.unique_tools == ["get_dga", "list_assets"]
+
+
+def test_metrics_from_pe_record_nonzero():
+    from evaluation.metrics import metrics_from_trajectory
+
+    rec = from_per_trial_dict(
+        _pe_payload_with_history_steps(),
+        run_id="run-y",
+        runner="plan_execute_baseline",
+        model="llama-3-1-8b-instruct",
+    )
+    ops = metrics_from_trajectory(rec)
+    assert ops.turn_count == 2
+    assert ops.tool_call_count == 2
+    assert ops.unique_tools == ["get_dga", "list_assets"]
+
+
+def test_metrics_from_pe_record_via_nested_trajectory_key():
+    """Some legacy PE captures put the step list under ``trajectory`` instead of ``history``."""
+    from evaluation.metrics import metrics_from_trajectory
+
+    payload = _pe_payload_with_history_steps()
+    payload["trajectory"] = payload.pop("history")
+    rec = from_per_trial_dict(payload, run_id="run-z", runner="plan_execute_baseline",
+                              model="llama-3-1-8b-instruct")
+    ops = metrics_from_trajectory(rec)
+    assert ops.turn_count == 2
+    assert ops.tool_call_count == 2

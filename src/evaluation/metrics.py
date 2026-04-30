@@ -28,8 +28,17 @@ def metrics_from_trajectory(record: PersistedTrajectory) -> OpsMetrics:
     if traj is None:
         return OpsMetrics()
 
-    if isinstance(traj, dict) and "turns" in traj:
-        return _from_sdk_trajectory(traj, record.model)
+    if isinstance(traj, dict):
+        if "turns" in traj:
+            return _from_sdk_trajectory(traj, record.model)
+        history = traj.get("history")
+        if isinstance(history, list):
+            if history and isinstance(history[0], dict) and "role" in history[0]:
+                return _from_sg_aat(traj, record.model)
+            return _from_plan_execute(history, record.model)
+        nested = traj.get("trajectory")
+        if isinstance(nested, list):
+            return _from_plan_execute(nested, record.model)
     if isinstance(traj, list):
         return _from_plan_execute(traj, record.model)
     return OpsMetrics()
@@ -58,6 +67,37 @@ def _from_sdk_trajectory(traj: dict, model: str) -> OpsMetrics:
         tokens_out=tokens_out,
         duration_ms=duration_ms,
         est_cost_usd=_estimate_cost(model, tokens_in, tokens_out),
+    )
+
+
+def _from_sg_aat(traj: dict, model: str) -> OpsMetrics:
+    """Smart Grid Bench AaT shape: top-level role-based turn history + summary counters.
+
+    Each ``history`` entry has ``{role, content, tool_calls, turn}``; each
+    ``tool_calls`` entry has ``{name, arguments, call_id, output}``. The team
+    runner pre-computes top-level ``turn_count`` and ``tool_call_count`` —
+    we prefer those when present and fall back to recomputing from history.
+    """
+    history = traj.get("history") or []
+    tool_names: list[str] = []
+    for turn in history:
+        for tc in (turn.get("tool_calls") or []):
+            name = tc.get("name")
+            if name:
+                tool_names.append(name)
+
+    turn_count = traj.get("turn_count")
+    if not isinstance(turn_count, int):
+        turn_count = len(history)
+    tool_call_count = traj.get("tool_call_count")
+    if not isinstance(tool_call_count, int):
+        tool_call_count = len(tool_names)
+
+    return OpsMetrics(
+        turn_count=turn_count,
+        tool_call_count=tool_call_count,
+        unique_tools=sorted(set(tool_names)),
+        est_cost_usd=_estimate_cost(model, 0, 0),
     )
 
 
