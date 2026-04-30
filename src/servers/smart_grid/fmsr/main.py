@@ -45,30 +45,34 @@ def _get_dga_records() -> pd.DataFrame:
 
 
 # ---------------------------------------------------------------------------
-# Rogers Ratio method (IEC 60599)
+# Rogers Ratio method (IEC 60599:2022 Table 1)
 # ---------------------------------------------------------------------------
-# Computes three gas ratios and maps them to a fault code via a lookup table
-# following IEC 60599 Table 1.
+# A classic DGA interpretation algorithm. It computes three gas ratios and
+# maps them to a fault code via a lookup table.
 #
-#   R1 = CH4 / H2
-#   R2 = C2H2 / C2H4
-#   R3 = C2H4 / C2H6
+# Ratios (using the JSON's R-numbering convention):
+#   R1 = CH4  / H2     (IEC Table 1 middle column)
+#   R2 = C2H2 / C2H4   (IEC Table 1 first column)
+#   R3 = C2H4 / C2H6   (IEC Table 1 third column)
+#
+# The lookup table below follows IEC 60599:2022 Table 1 (4th edition, p.13).
+# "NS" in the standard ("non-significant whatever the value") is encoded as
+# (0, None) on R2 since gas ratios are non-negative.
+#
+# Order: most-severe first so first-match-wins resolves overlap toward the
+# more severe code (e.g., D2 wins over D1 in the overlap region
+# R1 ∈ [0.1, 0.5), R2 ∈ [1.0, 2.5), R3 ≥ 2.0). Boundary phrasing here mirrors
+# the encoded ranges (min-inclusive, max-exclusive).
 
 _ROGERS_TABLE = [
-    # (R1_range, R2_range, R3_range) → (code, description)
+    # (R1_range, R2_range, R3_range, code, description)
     # Each range is (min_inclusive, max_exclusive); None = no bound.
-    ((0.1, 1.0), (0, 0.1), (0, 1.0), "PD", "Partial discharge"),
-    ((0.1, 1.0), (0.1, 3.0), (0, 1.0), "D1", "Spark discharge"),
-    (
-        (0.1, 1.0),
-        (0.1, 3.0),
-        (1.0, None),
-        "D2",
-        "Arc discharge",
-    ),
-    ((0.1, 1.0), (0, 0.1), (1.0, 3.0), "T1", "Low-temperature overheating"),
-    ((1.0, 3.0), (0, 0.1), (1.0, 3.0), "T2", "Middle-temperature overheating"),
-    ((3.0, None), (0, 0.1), (3.0, None), "T3", "High-temperature overheating"),
+    ((0.1, 1.0), (0.6, 2.5), (2.0, None), "D2", "Discharges of high energy (arcing)"),
+    ((0.1, 0.5), (1.0, None), (1.0, None), "D1", "Discharges of low energy"),
+    ((1.0, None), (0, 0.2), (4.0, None), "T3", "Thermal fault, t > 700 °C"),
+    ((1.0, None), (0, 0.1), (1.0, 4.0), "T2", "Thermal fault, 300 °C < t < 700 °C"),
+    ((1.0, None), (0, None), (0, 1.0), "T1", "Thermal fault, t < 300 °C"),
+    ((0, 0.1), (0, None), (0, 0.2), "PD", "Partial discharges"),
 ]
 
 
@@ -80,11 +84,59 @@ def _in_range(value: float, lo, hi) -> bool:
     return True
 
 
+def _ratio(numerator: float, denominator: float) -> float:
+    """Compute a gas ratio with explicit zero-denominator handling.
+
+    - denominator > 0:                   numerator / denominator (finite)
+    - denominator == 0 and numerator > 0: math.inf (a real ratio that diverges)
+    - denominator == 0 and numerator == 0: 0.0 (genuinely no signal)
+
+    Returning math.inf for a divergent ratio is critical: collapsing it to 0.0
+    would silently drop samples into the wrong fault class (e.g., a sample with
+    nonzero CH4 and C2H4 but zero C2H6 has R3 = +inf and should match D2 if the
+    other ratios fit, not fall through to N).
+    """
+    if denominator > 0:
+        return numerator / denominator
+    return math.inf if numerator > 0 else 0.0
+
+
+def _ratio_field(value: float) -> tuple:
+    """Normalize a ratio for JSON-safe outbound serialization.
+
+    Returns (json_safe_value, is_divergent). math.inf becomes None + True,
+    so `json.dumps(result, allow_nan=False)` succeeds on the public output.
+    Internal table matching keeps the raw float (including math.inf) — this
+    helper runs only at the dict-construction boundary.
+    """
+    if math.isinf(value):
+        return None, True
+    return round(value, 4), False
+
+
 def _rogers_ratio(h2: float, ch4: float, c2h2: float, c2h4: float, c2h6: float) -> dict:
-    """Apply Rogers Ratio method; return IEC code and description."""
-    r1 = ch4 / h2 if h2 > 0 else 0.0
-    r2 = c2h2 / c2h4 if c2h4 > 0 else 0.0
-    r3 = c2h4 / c2h6 if c2h6 > 0 else 0.0
+    """Apply Rogers Ratio method; return IEC code and description.
+
+    Output ratio fields are JSON-safe: a divergent ratio (zero denominator,
+    nonzero numerator) is reported as `null` with a sibling `r{1,2,3}_divergent: true`
+    flag rather than `inf`. Internal table matching uses the true infinity so
+    classification is correct.
+    """
+    r1 = _ratio(ch4, h2)
+    r2 = _ratio(c2h2, c2h4)
+    r3 = _ratio(c2h4, c2h6)
+
+    # All-zero gases → N. IEC 60599 Table 1 does not address the no-detectable-gas
+    # case explicitly; PD's R1/R3 ranges include 0 and would otherwise spuriously
+    # match. Operationally, no measurable gas means no fault, not partial discharge.
+    if h2 == 0 and ch4 == 0 and c2h2 == 0 and c2h4 == 0 and c2h6 == 0:
+        return {
+            "iec_code": "N",
+            "diagnosis": "Normal / Inconclusive",
+            "r1_ch4_h2": 0.0,
+            "r2_c2h2_c2h4": 0.0,
+            "r3_c2h4_c2h6": 0.0,
+        }
 
     for r1_range, r2_range, r3_range, code, description in _ROGERS_TABLE:
         if (
@@ -92,21 +144,30 @@ def _rogers_ratio(h2: float, ch4: float, c2h2: float, c2h4: float, c2h6: float) 
             and _in_range(r2, *r2_range)
             and _in_range(r3, *r3_range)
         ):
-            return {
-                "iec_code": code,
-                "diagnosis": description,
-                "r1_ch4_h2": round(r1, 4),
-                "r2_c2h2_c2h4": round(r2, 4),
-                "r3_c2h4_c2h6": round(r3, 4),
-            }
+            return _build_result(code, description, r1, r2, r3)
 
-    return {
-        "iec_code": "N",
-        "diagnosis": "Normal / Inconclusive",
-        "r1_ch4_h2": round(r1, 4),
-        "r2_c2h2_c2h4": round(r2, 4),
-        "r3_c2h4_c2h6": round(r3, 4),
+    return _build_result("N", "Normal / Inconclusive", r1, r2, r3)
+
+
+def _build_result(code: str, description: str, r1: float, r2: float, r3: float) -> dict:
+    """Build the public analyze_dga result dict with JSON-safe ratio fields."""
+    r1_val, r1_div = _ratio_field(r1)
+    r2_val, r2_div = _ratio_field(r2)
+    r3_val, r3_div = _ratio_field(r3)
+    result = {
+        "iec_code": code,
+        "diagnosis": description,
+        "r1_ch4_h2": r1_val,
+        "r2_c2h2_c2h4": r2_val,
+        "r3_c2h4_c2h6": r3_val,
     }
+    if r1_div:
+        result["r1_divergent"] = True
+    if r2_div:
+        result["r2_divergent"] = True
+    if r3_div:
+        result["r3_divergent"] = True
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -244,6 +305,11 @@ def analyze_dga(
           transformer_id (if provided), iec_code, diagnosis,
           r1_ch4_h2, r2_c2h2_c2h4, r3_c2h4_c2h6,
           input_gases (echo of inputs).
+
+        Ratio fields are always JSON-safe: a divergent ratio (zero
+        denominator with nonzero numerator) is reported as `null` plus a
+        sibling `r{1,2,3}_divergent: true` flag, never as a non-finite float.
+        Finite-ratio results omit the `*_divergent` keys entirely.
     """
     # Coerce to float: LLMs sometimes pass numeric args as strings even when
     # the tool schema declares "type": "number".
