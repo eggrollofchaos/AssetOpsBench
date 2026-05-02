@@ -34,7 +34,7 @@ Six synthetic CSV files, one per logical data slice:
 
 | File | Server(s) | Description |
 |---|---|---|
-| `asset_metadata.csv` | IoT | Static nameplate data per transformer (ID, rating, criticality, install date) |
+| `asset_metadata.csv` | IoT | Static nameplate data per transformer (`transformer_id`, `name`, `manufacturer`, `location`, `voltage_class`, `rating_kva`, `install_date`, `age_years`, `health_status`, `fdd_category`, `rul_days`, `in_service`) |
 | `sensor_readings.csv` | IoT, TSFM | Time-series sensor readings (load current, winding temp, oil temp, voltage) |
 | `failure_modes.csv` | FMSR | Failure mode catalogue with severity, IEC code, and recommended action |
 | `dga_records.csv` | FMSR | Dissolved Gas Analysis (DGA) records per transformer, per sample date |
@@ -42,11 +42,10 @@ Six synthetic CSV files, one per logical data slice:
 | `fault_records.csv` | WO | Historical fault and maintenance event records |
 
 All values are synthetic. Gas concentrations in `dga_records.csv` are
-calibrated against the IEC 60599:2022 Rogers Ratio fault-table boundaries
-encoded in
-[`data/knowledge/transformer_standards.json`](../../data/knowledge/transformer_standards.json)
-in the team repo, so `analyze_dga` tool outputs are internally consistent with
-the ground-truth labels.
+derived from the team's data pipeline; the IEC 60599:2022 Rogers Ratio
+fault-table boundaries used for DGA classification are encoded in
+`data/knowledge/transformer_standards.json` in the team repo
+(see `HPML6998-S26-Team13/hpml-assetopsbench-smart-grid-mcp`).
 
 ## No-CSV-port policy
 
@@ -100,8 +99,12 @@ artifact reflects:
 - **IEEE C57.104-2019** — condition framework (C1–C4) and gas threshold values
 
 The FMSR server's `analyze_dga` tool implements the Rogers Ratio method
-directly from this artifact, so generated DGA records and server outputs are
-mutually consistent.
+using the fault-table boundaries from that artifact. Note: the AOB fork
+server encodes the table directly in `src/servers/smart_grid/fmsr/main.py`
+rather than reading the JSON at runtime. Downstream users regenerating DGA
+records should verify that generated gas values round-trip correctly through
+`analyze_dga` for their intended fault labels before using them as benchmark
+ground truth.
 
 ## Citation
 
