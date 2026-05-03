@@ -52,10 +52,11 @@ fault-table boundaries used for DGA classification are encoded in
 The team repo's processed CSVs (under `data/processed/`) are **not** copied
 into this AOB fork or any upstream IBM PR. Reasons:
 
-1. **Licensing** — the five Kaggle source datasets used in the team's data
-   pipeline are CC0 individually, but the processed outputs are class-specific
-   derivatives. Keeping them out of AOB avoids a licensing audit for upstream
-   reviewers.
+1. **Licensing** — three of the five Kaggle source datasets are CC0; two
+   (Transformer Health Index — ODbL, and Current & Voltage Monitoring — author
+   copyright) have redistribution restrictions and are treated as local-only in
+   the team pipeline. No processed outputs derived from restricted sources are
+   ported to AOB, which avoids a licensing audit for upstream reviewers.
 2. **Reproducibility** — the synthetic data can be regenerated from
    `data/generate_synthetic.py` in the team repo. Any downstream user with the
    generator and the IEC encoding can produce equivalent datasets without
@@ -75,15 +76,15 @@ export SG_DATA_DIR=$(pwd)/data/processed
 
 ## Source datasets
 
-The team's data pipeline draws from five Kaggle CC0 datasets:
+The team's data pipeline draws from five Kaggle datasets; licensing varies:
 
-| Dataset | Domain servers |
-|---|---|
-| Power Transformers FDD & RUL | IoT, TSFM |
-| DGA Fault Classification | FMSR |
-| Smart Grid Fault Records | WO |
-| Transformer Health Index | FMSR (supplemental) |
-| Current & Voltage Monitoring | IoT, TSFM (supplemental) |
+| Dataset | License | Domain servers |
+|---|---|---|
+| Power Transformers FDD & RUL | CC0 | IoT, TSFM |
+| DGA Fault Classification | CC0 | FMSR |
+| Smart Grid Fault Records | CC0 | WO |
+| Transformer Health Index | ODbL (redistribution restricted; local-only) | FMSR (supplemental) |
+| Current & Voltage Monitoring | Author copyright (redistribution restricted; local-only) | IoT, TSFM (supplemental) |
 
 Dataset licensing details and row counts: `docs/hpml_datasets.pdf` in the team
 repo.
